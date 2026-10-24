@@ -1,0 +1,458 @@
+// content.js — builds the floating chat panel and renders tools as chat cards.
+// This is the "shell": a button, a panel with a stream, and an input that can
+// also launch tools by name.
+
+(function () {
+  if (window.__fcToolboxLoaded || document.getElementById("fc-root")) return; // avoid double injection
+  window.__fcToolboxLoaded = true;
+
+  const NS = "data-fc";
+  const root = document.createElement("div");
+  root.id = "fc-root";
+  root.setAttribute(NS, "1");
+  root.innerHTML = `
+    <button id="fc-tb-btn" type="button" aria-label="Open toolbox">💬</button>
+    <div id="fc-panel" hidden>
+      <div id="fc-header">
+        <span class="fc-title">💬 Toolbox <span class="fc-ver"></span></span>
+        <div class="fc-header-actions">
+          <button id="fc-tools-toggle" type="button" title="Tools" aria-label="Tools">⋮</button>
+          <button id="fc-close" type="button" title="Close">✕</button>
+        </div>
+      </div>
+      <div id="fc-tool-host" hidden></div>
+      <div id="fc-stream"></div>
+      <div id="fc-footer">
+        <input id="fc-input" type="text" placeholder="Ask me anything or paste a link…" />
+        <button id="fc-send" type="button">Send</button>
+      </div>
+    </div>`;
+  document.documentElement.appendChild(root);
+
+  const panel = root.querySelector("#fc-panel");
+  const stream = root.querySelector("#fc-stream");
+  const headerEl = root.querySelector("#fc-header");
+  const tabsBar = document.createElement("div");
+  tabsBar.className = "fc-tabs-bar";
+  tabsBar.innerHTML = '<button class="fc-tab-btn active" data-tab="chat">Chat</button><button class="fc-tab-btn" data-tab="media">Media</button><button class="fc-tab-btn" data-tab="tools">Tools</button><button class="fc-tab-btn" data-tab="links">Links</button><button class="fc-tab-btn" data-tab="settings">Settings</button>';
+  headerEl.after(tabsBar);
+  const tabsWrap = document.createElement("div");
+  tabsWrap.className = "fc-tabs-wrap";
+  const tChat = document.createElement("div"); tChat.className="fc-tab-content active"; tChat.appendChild(stream);
+  const tMedia = document.createElement("div"); tMedia.className="fc-tab-content"; tMedia.innerHTML='<div class="fc-tab-ph">Media</div>';
+  const tTools = document.createElement("div"); tTools.className="fc-tab-content";
+  const tLinks = document.createElement("div"); tLinks.className="fc-tab-content"; tLinks.innerHTML='<div class="fc-tab-ph">Links</div>';
+  const tSettings = document.createElement("div"); tSettings.className="fc-tab-content"; tSettings.innerHTML='<div class="fc-tab-ph">Settings</div>';
+  tabsWrap.append(tChat,tMedia,tTools,tLinks,tSettings);
+  tabsBar.after(tabsWrap);
+  const btns = tabsBar.querySelectorAll(".fc-tab-btn");
+  const cons = tabsWrap.querySelectorAll(".fc-tab-content");
+  let toolsWrap2 = null;
+  function showInTools(){
+    if(!toolsWrap2){ toolsWrap2=document.createElement("div"); toolsWrap2.className="fc-tools-tab-wrap"; tTools.appendChild(toolsWrap2); }
+    toolsWrap2.querySelectorAll(".fc-tools").forEach(g=>g.remove());
+    if(!FC_TOOLS||!FC_TOOLS.length)return;
+    const wrap=document.createElement("div"); wrap.className="fc-tools";
+    FC_TOOLS.forEach(t=>{const c=document.createElement("button"); c.className="fc-tool-card"; c.type="button"; c.innerHTML='<span class="fc-tool-icon">'+t.icon+'</span><span class="fc-tool-name">'+t.name+'</span>'; c.addEventListener("click",()=>openTool(t.id)); wrap.appendChild(c);});
+    toolsWrap2.appendChild(wrap);
+  }
+  btns.forEach(b=>{ b.addEventListener("click",()=>{ btns.forEach(x=>x.classList.remove("active")); cons.forEach(x=>x.classList.remove("active")); b.classList.add("active"); const tt=b.getAttribute("data-tab"); if(tt==="chat")tChat.classList.add("active"); if(tt==="media")tMedia.classList.add("active"); if(tt==="tools"){tTools.classList.add("active"); showInTools();} if(tt==="links")tLinks.classList.add("active"); if(tt==="settings")tSettings.classList.add("active"); }); });
+
+  const toolHost = root.querySelector("#fc-tool-host");
+  let currentTool = null;
+  const input = root.querySelector("#fc-input");
+  const btn = root.querySelector("#fc-tb-btn");
+  try {
+    const verEl = root.querySelector(".fc-ver");
+    if (verEl) verEl.textContent = "v" + chrome.runtime.getManifest().version;
+    console.info("[Toolbox] v" + chrome.runtime.getManifest().version + " ready");
+  } catch (_) {}
+
+  // ---- helpers ----
+  function bubble(text, cls) {
+    const b = document.createElement("div");
+    b.className = "fc-bubble " + (cls || "bot");
+    b.textContent = text;
+    stream.appendChild(b);
+    stream.scrollTop = stream.scrollHeight;
+    return b;
+  }
+  function showToolsGrid() {
+    // Remove any existing grids first so the tools never repeat in the stream.
+    stream.querySelectorAll(".fc-tools").forEach((g) => g.remove());
+    if (!FC_TOOLS || !FC_TOOLS.length) {
+      bubble("Tools failed to load. Please refresh this page (F5).", "bot");
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "fc-tools";
+    FC_TOOLS.forEach((t) => {
+      const card = document.createElement("button");
+      card.className = "fc-tool-card";
+      card.type = "button";
+      card.innerHTML = `<span class="fc-tool-icon">${t.icon}</span><span class="fc-tool-name">${t.name}</span>`;
+      card.title = t.desc;
+      card.addEventListener("click", () => openTool(t.id));
+      wrap.appendChild(card);
+    });
+    stream.appendChild(wrap);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  function closeCurrentTool() {
+    if (currentTool && typeof currentTool.cleanup === "function") {
+      try { currentTool.cleanup(); } catch (_) {}
+    }
+    currentTool = null;
+    toolHost.innerHTML = "";
+    toolHost.hidden = true;
+  }
+  function openTool(id) {
+    try {
+      const tool = FC_TOOLS.find((t) => t.id === id);
+      if (!tool) return;
+      stream.querySelectorAll(".fc-tools").forEach((g) => g.remove());
+      stream.querySelectorAll(".fc-greeting").forEach((g) => g.remove());
+      closeCurrentTool();
+      currentTool = tool;
+      const card = document.createElement("div");
+      card.className = "fc-card fc-card-host";
+      const head = document.createElement("div");
+      head.className = "fc-card-head";
+      head.innerHTML = "<span><span class=\"fc-tool-title\">" + tool.name + "</span></span>";
+      const backBtn = document.createElement("button");
+      backBtn.className = "fc-btn-icon fc-back";
+      backBtn.type = "button";
+      backBtn.title = "Back to tools";
+      backBtn.setAttribute("aria-label", "Back to tools");
+      backBtn.textContent = "←";
+      backBtn.addEventListener("click", function () {
+        closeCurrentTool();
+        showToolsGrid();
+      });
+      head.insertBefore(backBtn, head.firstChild);
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "fc-btn-icon";
+      closeBtn.type = "button";
+      closeBtn.textContent = "✕";
+      closeBtn.addEventListener("click", function () { closeCurrentTool(); });
+      head.appendChild(closeBtn);
+      const body = document.createElement("div");
+      body.className = "fc-card-body";
+      card.appendChild(head);
+      card.appendChild(body);
+      toolHost.appendChild(card);
+      toolHost.hidden = false;
+      toolHost.scrollTop = 0;
+      try {
+        const cleanup = tool.mount(body);
+        if (typeof cleanup === "function") tool.cleanup = cleanup;
+      } catch (e) {
+        var p = document.createElement("p");
+        p.className = "fc-note";
+        p.textContent = "Tool error: " + e.message;
+        body.appendChild(p);
+      }
+      toolHost.scrollTop = 0;
+    } catch (e) {
+      bubble("Error opening tool.", "bot");
+    }
+  }
+
+  // ---- open / close ----
+  let opened = false;
+  function toggle(open) {
+    opened = open === undefined ? !opened : open;
+    panel.hidden = !opened;
+    if (opened && !stream.dataset.ready) {
+      stream.dataset.ready = "1";
+      let ver = "";
+      try { ver = chrome.runtime.getManifest().version; } catch (_) {}
+      const greet = bubble("Hi! 👋 May I help you?", "bot");
+      greet.classList.add("fc-greeting");
+      showToolsGrid();
+      input.focus();
+    }
+  }
+  btn.addEventListener("click", () => toggle());
+  const closeBtnEl = root.querySelector("#fc-close"); if (closeBtnEl) closeBtnEl.addEventListener("click", () => toggle(false));
+  root.querySelector("#fc-tools-toggle").addEventListener("click", () => {
+    const existing = stream.querySelector(".fc-tools");
+    if (existing) existing.remove();
+    else showToolsGrid();
+  });
+
+  // ---- URL handling: paste/type a link and it opens immediately ----
+  function normalizeUrl(text) {
+    let t = (text || "").trim().replace(/^[<("'`]+|[>)"'`]+$/g, "");
+    if (!t) return null;
+    // 1) explicit scheme anywhere in the text
+    let m = t.match(/https?:\/\/[^\s<>"')]+/i);
+    if (m) return m[0];
+    // 2) www. …
+    m = t.match(/www\.[^\s<>"')]+/i);
+    if (m) return "https://" + m[0];
+    // 3) bare domain with a real alphabetic TLD (avoids matching "3.2"/"file.txt")
+    m = t.match(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\/[^\s<>"')]*)?/i);
+    if (m) {
+      const cand = m[0];
+      const tld = cand.split(".").pop().toLowerCase();
+      const FILEEXT = ["txt", "js", "json", "png", "jpg", "jpeg", "gif", "css", "html", "md", "zip", "pdf", "mp4", "csv", "exe", "svg", "webp"];
+      if (!/^\d+\.\d+/.test(cand) && /[a-z]{2,}/i.test(tld) && !FILEEXT.includes(tld)) return "https://" + cand;
+    }
+    return null;
+  }
+  function linkBubble(url) {
+    const b = document.createElement("div");
+    b.className = "fc-bubble bot";
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.className = "fc-link";
+    a.textContent = "🔗 " + url;
+    b.appendChild(a);
+    stream.appendChild(b);
+    stream.scrollTop = stream.scrollHeight;
+  }
+  function openUrl(url) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+  function youtubeId(u) {
+    const h = u.hostname.replace(/^www\./, "");
+    if (h === "youtu.be") return u.pathname.slice(1).split("/")[0] || null;
+    if (h.endsWith("youtube.com")) {
+      if (u.pathname === "/watch") return u.searchParams.get("v");
+      const m = u.pathname.match(/^\/(shorts|embed|live|v)\/([\w-]+)/);
+      if (m) return m[2];
+    }
+    return null;
+  }
+  // Show a rich preview card for a link: embed / player / thumbnail,
+  // plus a clickable link on TOP that opens the full page.
+  
+  function previewBubble(url) {
+    let u;
+    try { u = new URL(url); } catch (_) { return linkBubble(url); }
+    const host = u.hostname.replace(/^www\./, "");
+    const path = u.pathname;
+    const card = FC.el("div", { class: "fc-preview" });
+    const top = FC.el("a", { class: "fc-preview-top", href: url, target: "_blank", rel: "noopener noreferrer" });
+    top.textContent = "🔗 " + host + "  ↗";
+    card.appendChild(top);
+    const body = FC.el("div", { class: "fc-preview-body" });
+    card.appendChild(body);
+
+    const yt = youtubeId(u);
+    if (yt) {
+      const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe src="https://www.youtube.com/embed/' + encodeURIComponent(yt) + '" allow="autoplay;encrypted-media;fullscreen;picture-in-picture" allowfullscreen></iframe></body></html>';
+      body.appendChild(FC.el("iframe", { class: "fc-embed", srcdoc: html, frameborder: "0" }));
+      stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+    }
+    if (host === "open.spotify.com" || host.endsWith(".spotify.com")) {
+      const m = u.pathname.match(/^\/(track|album|playlist|episode|show|artist)\/([a-zA-Z0-9]+)/);
+      if (m) {
+        const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe src="https://open.spotify.com/embed/' + encodeURIComponent(m[1] + "/" + m[2]) + '" allow="encrypted-media"></iframe></body></html>';
+        body.appendChild(FC.el("iframe", { class: "fc-embed", srcdoc: html, frameborder: "0" }));
+        stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+      }
+    }
+    if (host === "vimeo.com" || host.endsWith(".vimeo.com")) {
+      const m = u.pathname.match(/\/(\d+)/);
+      if (m) {
+        const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe src="https://player.vimeo.com/video/' + encodeURIComponent(m[1]) + '" allow="autoplay;fullscreen" allowfullscreen></iframe></body></html>';
+        body.appendChild(FC.el("iframe", { class: "fc-embed", srcdoc: html, frameborder: "0" }));
+        stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+      }
+    }
+    if (/\.(mp3|m4a|wav|ogg|oga|aac|flac)$/i.test(path)) {
+      const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}audio{width:100%;height:100%;}</style></head><body><audio src="' + encodeURI(url) + '" controls></audio></body></html>';
+      body.appendChild(FC.el("iframe", { class: "fc-embed fc-audio-frame", srcdoc: html, frameborder: "0" }));
+      stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+    }
+    if (/\.(mp4|webm|ogv|mov)$/i.test(path)) {
+      const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}video{width:100%;height:100%;}</style></head><body><video src="' + encodeURI(url) + '" controls></video></body></html>';
+      body.appendChild(FC.el("iframe", { class: "fc-embed fc-video-frame", srcdoc: html, frameborder: "0" }));
+      stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+    }
+    if (/\.(png|jpe?g|gif|webp|svg)$/i.test(path)) {
+      const html = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#000}img{width:100%;height:100%;object-fit:cover}</style></head><body><img src="' + encodeURI(url) + '"></body></html>';
+      body.appendChild(FC.el("iframe", { class: "fc-embed fc-img-frame", srcdoc: html, frameborder: "0" }));
+      stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+    }
+    body.appendChild(FC.el("div", { class: "fc-note", text: "⏳ Loading preview…" }));
+    FC.callBg("meta", { url }).then(function(meta){
+      meta = meta || {};
+      body.innerHTML = "";
+      if (meta.image) body.appendChild(FC.el("img", { class: "fc-preview-img", src: meta.image, alt: host }));
+      if (meta.title) body.appendChild(FC.el("div", { class: "fc-preview-title", text: meta.title }));
+      if (meta.description) body.appendChild(FC.el("div", { class: "fc-preview-desc", text: meta.description }));
+      if (!meta.title && !meta.image) body.appendChild(FC.el("div", { class: "fc-note", text: host }));
+      stream.scrollTop = stream.scrollHeight;
+    }).catch(function(){ body.innerHTML=""; body.appendChild(FC.el("div", { class: "fc-note", text: host })); });
+    stream.appendChild(card); stream.scrollTop = stream.scrollHeight; return card;
+  }
+
+  
+  function findTool(q) {
+    q = q.toLowerCase().trim();
+    let t = FC_TOOLS.find((x) => x.id === q);
+    if (t) return t;
+    t = FC_TOOLS.find((x) => x.name.toLowerCase().includes(q) || q.includes(x.name.toLowerCase()));
+    if (t) return t;
+    const words = q.split(/\s+/).filter(Boolean);
+    t = FC_TOOLS.find((x) => words.some((w) => x.id === w || (w.length > 2 && x.name.toLowerCase().includes(w))));
+    return t || null;
+  }
+
+  // Quick calculator: "1+1", "12 * 3", "= 5/2" → instant result in chat.
+  // Safe recursive-descent parser (MV3 blocks eval/new Function).
+  function evalExpr(src) {
+    const tokens = String(src).match(/\d+(?:\.\d+)?|\.\d+|[+\-*/%()]/g);
+    if (!tokens) return null;
+    let i = 0;
+    const peek = () => tokens[i];
+    const eat = (t) => (tokens[i] === t ? (i++, true) : false);
+
+    function parseExpr() {
+      let v = parseTerm();
+      if (v === null) return null;
+      while (peek() === "+" || peek() === "-") {
+        const op = tokens[i++];
+        const r = parseTerm();
+        if (r === null) return null;
+        v = op === "+" ? v + r : v - r;
+      }
+      return v;
+    }
+    function parseTerm() {
+      let v = parseFactor();
+      if (v === null) return null;
+      while (peek() === "*" || peek() === "/" || peek() === "%") {
+        const op = tokens[i++];
+        const r = parseFactor();
+        if (r === null) return null;
+        if ((op === "/" || op === "%") && r === 0) return null;
+        v = op === "*" ? v * r : op === "/" ? v / r : v % r;
+      }
+      return v;
+    }
+    function parseFactor() {
+      if (eat("+")) return parseFactor();
+      if (eat("-")) {
+        const v = parseFactor();
+        return v === null ? null : -v;
+      }
+      if (eat("(")) {
+        const v = parseExpr();
+        if (!eat(")")) return null;
+        return v;
+      }
+      const tok = tokens[i];
+      if (tok && /^\d*\.?\d+$/.test(tok)) {
+        i++;
+        return parseFloat(tok);
+      }
+      return null;
+    }
+
+    const val = parseExpr();
+    if (val === null || i !== tokens.length) return null;
+    if (typeof val !== "number" || !isFinite(val)) return null;
+    return val;
+  }
+
+  function tryMath(text) {
+    const t = String(text || "").trim().replace(/^=\s*/, "").replace(/\s+/g, "");
+    if (!t || !/[+\-*/%]/.test(t)) return null;
+    if (!/^[\d+\-*/().%]+$/.test(t)) return null;
+    if (!/\d/.test(t)) return null;
+    const val = evalExpr(t);
+    if (val === null) return null;
+    return String(Math.round(val * 1e10) / 1e10);
+  }
+
+  // ---- input handling ----
+  function handleInput() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+
+    const url = normalizeUrl(text);
+    if (url) {
+      bubble(text, "user");
+      previewBubble(url);
+      return;
+    }
+
+    const math = tryMath(text);
+    if (math !== null) {
+      bubble(text, "user");
+      setTimeout(() => bubble("= " + math, "bot"), 60);
+      return;
+    }
+
+    const tool = findTool(text);
+    if (tool) { openTool(tool.id); return; }
+
+    // Nothing matched
+    bubble(text, "user");
+    setTimeout(() => {
+      bubble("Hmm 🤔, I don't know na. Tap sa tools button para makita.", "bot");
+    }, 100);
+  }
+
+  // paste a link → show a preview card (click the top link to open it)
+  input.addEventListener("paste", (e) => {
+    const pasted = (e.clipboardData || window.clipboardData).getData("text");
+    const url = normalizeUrl(pasted);
+    if (url) {
+      e.preventDefault();
+      input.value = "";
+      bubble(pasted.trim(), "user");
+      previewBubble(url);
+    }
+  });
+  root.querySelector("#fc-send").addEventListener("click", handleInput);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); handleInput(); } });
+
+  // If the extension was reloaded/updated while this page stayed open, the old
+  // content script is orphaned. Tell the user to refresh instead of erroring.
+  window.addEventListener("unhandledrejection", (e) => {
+    if (e.reason && FC.isStale(e.reason)) {
+      e.preventDefault();
+      try { bubble("Extension was updated. Please refresh this page (F5).", "bot"); } catch (_) {}
+    }
+  });
+
+  // ---- drag the panel by its header ----
+  (function makeDraggable() {
+    const header = root.querySelector("#fc-header");
+    let sx, sy, ox, oy, dragging = false;
+    header.addEventListener("mousedown", (e) => {
+      if (e.target.tagName === "BUTTON") return;
+      dragging = true;
+      const r = panel.getBoundingClientRect();
+      sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      panel.style.left = ox + (e.clientX - sx) + "px";
+      panel.style.top = oy + (e.clientY - sy) + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+    });
+    document.addEventListener("mouseup", () => (dragging = false));
+  })();
+
+  // ---- popup button can ask us to open ----
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.type === "fc:toggle") toggle(true);
+    });
+  }
+
+  // ---- run tool startup hooks (dark mode, clipboard, reminders...) ----
+  FC_TOOL_HOOKS.forEach((fn) => { try { fn(); } catch (_) {} });
+})();

@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Floating Chat Toolbox",
+  "version": "22.3",
+  "description": "A floating chat with 6 in-page tools (notes, calendar, QR/shortener, dark mode, page stats, calculator) plus rich link previews.",
+  "action": {
+    "default_title": "Floating Chat Toolbox",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "utils.js",
+        "tools.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": [
+    "storage",
+    "notifications",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "preview.html",
+        "preview.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
